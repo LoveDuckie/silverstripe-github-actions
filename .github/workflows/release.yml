@@ -1,0 +1,98 @@
+name: Reusable SilverStripe Module Release Workflow
+
+on:
+  workflow_call:
+    inputs:
+      bump_type:
+        description: 'Version bump type (major, minor, patch)'
+        required: true
+        default: 'patch'
+      silverstripe_module_name:
+        description: 'The name of the Silverstripe module'
+        required: true
+        default: 'patch'
+    secrets:
+      GITHUB_TOKEN:
+        required: true
+
+jobs:
+  release:
+    name: Release Module
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Ensure jq is installed
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.1'
+          extensions: mbstring, intl, pdo_mysql
+          ini-values: display_errors=1, memory_limit=2G
+          coverage: none
+
+      - name: Install Composer Dependencies
+        run: composer install --prefer-dist --no-progress --no-suggest --no-interaction
+
+      - name: Run Unit Tests
+        run: |
+          if [ -f ./vendor/bin/phpunit ]; then
+            ./vendor/bin/phpunit
+          else
+            echo "PHPUnit is not installed or configured in this project."
+            exit 1
+          fi
+
+      - name: Bump Version
+        id: bump_version
+        run: |
+          VERSION_BUMP_TYPE="${{ inputs.bump_type }}"
+          current_version=$(jq -r '.version' composer.json)
+          IFS='.' read -r major minor patch <<<"$current_version"
+          if [[ "$VERSION_BUMP_TYPE" == "major" ]]; then
+            major=$((major + 1))
+            minor=0
+            patch=0
+          elif [[ "$VERSION_BUMP_TYPE" == "minor" ]]; then
+            minor=$((minor + 1))
+            patch=0
+          elif [[ "$VERSION_BUMP_TYPE" == "patch" ]]; then
+            patch=$((patch + 1))
+          fi
+          new_version="$major.$minor.$patch"
+          echo "New version: $new_version"
+          echo "::set-output name=new_version::$new_version"
+          jq ".version = \"$new_version\"" composer.json > composer.json.tmp && mv composer.json.tmp composer.json
+
+      - name: Commit and Push Version Bump
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add composer.json
+          git commit -m "Bump version to ${{ steps.bump_version.outputs.new_version }}"
+          git push origin main
+
+      - name: Package Module
+        run: |
+          mkdir -p release
+          zip -r release/silverstripe-module-${{ steps.bump_version.outputs.new_version }}.zip .
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.bump_version.outputs.new_version }}
+          release_name: "SilverStripe Module v${{ steps.bump_version.outputs.new_version }}"
+          draft: false
+          prerelease: false
+          files: release/silverstripe-module-${{ steps.bump_version.outputs.new_version }}.zip
